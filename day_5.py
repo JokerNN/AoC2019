@@ -197,9 +197,9 @@ inp = list(map(int, s_input.split(',')))
 
 
 
-# executor1 = ProgramExecutor(inp)
-# executor1.run()
-# print("Answer 1", executor1.result[-1])
+executor1 = ProgramExecutor(inp)
+executor1.run()
+print("Answer 1", executor1.result[-1])
 
 
 DEBUG_LOG = False
