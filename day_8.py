@@ -32,7 +32,7 @@ res_img = []
 for i in range(0, width * height, width):
   res_img.append(res_layer[i: i + width])
 
-print('\n'.join(res_img))
+print('\n'.join((row.replace('1', '*').replace('0', ' ') for row in res_img)))
 
 try:
   from PIL import Image
