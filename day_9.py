@@ -11,7 +11,10 @@ runner = ProgramExecutor(program, inputs = [1])
 
 runner.run()
 
-print(runner.state)
 print(runner.result)
 
+runner2 = ProgramExecutor(program, inputs = [2])
+runner2.run()
+
+print(runner2.result)
 
