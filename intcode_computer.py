@@ -9,6 +9,7 @@ JUMP_IF_TRUE = 5
 JUMP_IF_FALSE = 6
 LESS_THAN = 7
 EQUALS = 8
+ADJUST_REL_BASE = 9
 HALT = 99
 
 KNOWN_COMMANDS = {
@@ -20,28 +21,46 @@ KNOWN_COMMANDS = {
   JUMP_IF_FALSE: 6,
   LESS_THAN: 7,
   EQUALS: 8,
+  ADJUST_REL_BASE: 9,
   HALT: 99
 }
 
-PARAM_MODES = {
-  'ADDRESS': 0,
-  'VALUE': 1
-}
 
 class IncodeRuntimeException(Exception):
   pass
 
-class LostInput(IncodeRuntimeException):
+class WriteToValueException(IncodeRuntimeException):
   pass
 
 class UnknownCommandException(IncodeRuntimeException):
   pass
 
+
+def moves_pointer(num):
+  def factory(func):
+    def wrapped_func(self, *args,**kwargs):
+      res = func(self, *args, **kwargs)
+      self.pos += num + 1
+      return res
+
+    return wrapped_func
+    
+  return factory
+
 class ProgramExecutor:
-  INIT = 'INIT'
-  RUNNING = 'RUNNING'
-  HALTED = 'HALTED'
-  WAITING_FOR_INPUT = 'WAITING_FOR_INPUT'
+
+  STATES = {
+    'INIT': 'INIT',
+    'RUNNING': 'RUNNING',
+    'HALTED': 'HALTED',
+    'WAITING_FOR_INPUT': 'WAITING_FOR_INPUT'
+  }
+
+  PARAM_MODES = {
+    'ADDRESS': 0,
+    'VALUE': 1,
+    'RELATIVE': 2
+  }
 
   def __init__(
       self, 
@@ -53,14 +72,16 @@ class ProgramExecutor:
       }, 
       max_steps: int = float('inf')
     ):
-    self.program = list(program)
+    # self.program = list(program)
+    self.program = defaultdict(int, enumerate(program))
     self.pos = 0
     self.result = []
     self.inputs = inputs
     self.debug_log = logging_pref['debug']
     self.verbose_log = logging_pref['verbose']
     self.max_steps = max_steps
-    self.state = ProgramExecutor.INIT
+    self.state = ProgramExecutor.STATES['INIT']
+    self.relative_base = 0
 
   def debug(self, *args, **kwargs):
     if self.debug_log:
@@ -89,6 +110,23 @@ class ProgramExecutor:
     except KeyError:
       return 'UNKNOWN'
 
+  def get_params(self, param_modes: defaultdict, param_count: int):
+    params = {}
+    pos = self.pos
+
+    for idx in range(1, param_count + 1):
+      if param_modes[idx - 1] == ProgramExecutor.PARAM_MODES['ADDRESS']:
+        addr = self.program[pos + idx]
+        params[idx - 1] = self.program[addr]
+      elif param_modes[idx - 1] == ProgramExecutor.PARAM_MODES['RELATIVE']:
+        addr = self.program[pos + idx] + self.relative_base
+        params[idx - 1] = self.program[addr]
+      else:
+        params[idx - 1] = self.program[pos + idx]
+
+    return params
+
+    
   def parse_op(self):
     pos = self.pos
     command = str(self.program[self.pos])
@@ -103,43 +141,95 @@ class ProgramExecutor:
     for idx, char in enumerate(reversed(command[:-2])):
       result['param_modes'][idx] = int(char)
 
-    # print('Param modes', result['param_modes'])
-
     if result['command'] in {ADD, MULT, LESS_THAN, EQUALS}:
-      for i in range(1, 3):
-        if result['param_modes'][i - 1] == PARAM_MODES['ADDRESS']:
-          # print('Cur pos', pos + i)
-          addr = self.program[pos + i]
-          # print('Value', addr)
-          # print(pos)
-          result['params'][i - 1] = self.program[addr]
-        else:
-          result['params'][i - 1] = self.program[pos + i]
-
-      result['params'][2] = self.program[pos + 3]
+      result['params'] = self.get_params(result['param_modes'], 2)
+      
+      if result['param_modes'][2] == ProgramExecutor.PARAM_MODES['ADDRESS']:
+        result['params'][2] = self.program[pos + 3]
+      elif result['param_modes'][2] == ProgramExecutor.PARAM_MODES['RELATIVE']:
+        result['params'][2] = self.program[pos + 3] + self.relative_base
+      else:
+        raise WriteToValueException('Seems like you try to write to constant, but it should be an address')
     
     elif result['command'] == INPUT:
-      if result['param_modes'][0] == PARAM_MODES['ADDRESS']:
+      if result['param_modes'][0] == ProgramExecutor.PARAM_MODES['ADDRESS']:
         addr = self.program[pos + 1]
         result['params'][0] = addr
-      else:
-        result['params'][0] = self.program[pos + 1]
+      elif result['param_modes'][0] == ProgramExecutor.PARAM_MODES['RELATIVE']:
+        addr = self.program[pos + 1] + self.relative_base
+        result['params'][0] = addr
+
     elif result['command'] == OUTPUT:
-      if result['param_modes'][0] == PARAM_MODES['ADDRESS']:
-        addr = self.program[pos + 1]
-        result['params'][0] = self.program[addr]
-      else:
-        result['params'][0] = self.program[pos + 1]
+      result['params'] = self.get_params(result['param_modes'], 1)
 
     elif result['command'] in {JUMP_IF_FALSE, JUMP_IF_TRUE}:
-      for i in range(1, 3):
-        if result['param_modes'][i - 1] == PARAM_MODES['ADDRESS']:
-          addr = self.program[pos + i]
-          result['params'][i - 1] = self.program[addr]
-        else:
-          result['params'][i - 1] = self.program[pos + i]
+      result['params'] = self.get_params(result['param_modes'], 2)
+
+    elif result['command'] == ADJUST_REL_BASE:
+      result['params'] = self.get_params(result['param_modes'], 1)
 
     return result
+
+
+  @moves_pointer(3)
+  def __execute_add(self, op):
+    self.program[op['params'][2]] = op['params'][0] + op['params'][1]
+
+
+  @moves_pointer(3)
+  def __execute_mult(self, op):
+    self.program[op['params'][2]] = op['params'][0] * op['params'][1]
+
+
+  def __execute_input(self, op):
+    if len(self.inputs) == 0:
+      self.state = ProgramExecutor.STATES['WAITING_FOR_INPUT']
+    else:
+      self.program[op['params'][0]] = self.inputs.pop(0)
+      self.pos += 2
+
+
+  @moves_pointer(1)
+  def __execute_output(self, op):
+    self.result.append(op['params'][0])
+
+
+  def __execute_jump_if_true(self, op):
+    if op['params'][0] != 0:
+      self.pos = op['params'][1]
+    else:
+      self.pos += 3
+
+
+  def __execute_jump_if_false(self, op):
+    if op['params'][0] == 0:
+      self.pos = op['params'][1]
+    else:
+      self.pos += 3
+
+
+  @moves_pointer(3)
+  def __execute_less_than(self, op):
+    res = 0
+    if op['params'][0] < op['params'][1]:
+      res = 1
+
+    self.program[op['params'][2]] = res
+
+
+  @moves_pointer(3)
+  def __execute_equals(self, op):
+    res = 0
+    if op['params'][0] == op['params'][1]:
+      res = 1
+
+    self.program[op['params'][2]] = res
+
+
+  @moves_pointer(1)
+  def __execute_adjust_rel_base(self, op):
+    self.relative_base += op['params'][0]
+
 
   def __execute_step(self):
     op = self.parse_op()
@@ -152,73 +242,38 @@ class ProgramExecutor:
     if command not in KNOWN_COMMANDS:
       raise UnknownCommandException(command)
 
-    if command == ADD:
-      self.program[op['params'][2]] = op['params'][0] + op['params'][1]
-      # print(self)
-      # print('Assigning addr', op['params'][2], ' result of addition ', op['params'][0], ' and ', op['params'][1])
+    op_func = {
+      ADD: self.__execute_add,
+      MULT: self.__execute_mult,
+      INPUT: self.__execute_input,
+      OUTPUT: self.__execute_output,
+      JUMP_IF_TRUE: self.__execute_jump_if_true,
+      JUMP_IF_FALSE: self.__execute_jump_if_false,
+      LESS_THAN: self.__execute_less_than,
+      EQUALS: self.__execute_equals,
+      ADJUST_REL_BASE: self.__execute_adjust_rel_base
+    }
 
-    elif command == MULT:
-      self.program[op['params'][2]] = op['params'][0] * op['params'][1]
-
-    elif command == INPUT:
-      if len(self.inputs) == 0:
-        self.state = ProgramExecutor.WAITING_FOR_INPUT
-      else:
-        self.program[op['params'][0]] = self.inputs.pop(0)
-        self.pos += 2
-
-    elif command == OUTPUT:
-      self.result.append(op['params'][0])
-
-    elif command == JUMP_IF_TRUE:
-      if op['params'][0] != 0:
-        self.pos = op['params'][1]
-      else:
-        self.pos += 3
-
-    elif command == JUMP_IF_FALSE:
-      if op['params'][0] == 0:
-        self.pos = op['params'][1]
-      else:
-        self.pos += 3
-
-    elif command == LESS_THAN:
-      res = 0
-      if op['params'][0] < op['params'][1]:
-        res = 1
-
-      self.program[op['params'][2]] = res
-
-    elif command == EQUALS:
-      res = 0
-      if op['params'][0] == op['params'][1]:
-        res = 1
-
-      self.program[op['params'][2]] = res
-
-    if command in {ADD, MULT, LESS_THAN, EQUALS}:
-      self.pos += 4
-    elif command in {OUTPUT}:
-      self.pos += 2
+    op_func[command](op)
 
   def add_inputs(self, *args: List[int]):
     self.inputs.extend(args)
 
   def run(self):
     counter = 0
-    self.state = ProgramExecutor.RUNNING
+    self.state = ProgramExecutor.STATES['RUNNING']
     while True:
       if self.pos >= len(self.program):
         break
 
       if self.program[self.pos] == HALT:
-        self.state = ProgramExecutor.HALTED
+        self.state = ProgramExecutor.STATES['HALTED']
         break
 
       if counter >= self.max_steps:
         break
 
-      if self.state == ProgramExecutor.WAITING_FOR_INPUT:
+      if self.state == ProgramExecutor.STATES['WAITING_FOR_INPUT']:
         break
 
       self.__execute_step()

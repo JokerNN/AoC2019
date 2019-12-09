@@ -54,7 +54,7 @@ for amp_setting in permutations(range(5, 10)):
     ampE.run()
     prev_output = ampE.result.pop(0)
 
-    if ampE.state == ProgramExecutor.HALTED:
+    if ampE.state == ProgramExecutor.STATES['HALTED']:
       break
 
 
