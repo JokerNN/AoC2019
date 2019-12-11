@@ -190,5 +190,4 @@ while destroyed_count < 200:
   asteroids.remove(destroyed)
   destroyed_count += 1
 
-
-print(asteroids)
+print('200th destroyed point', destroyed)
